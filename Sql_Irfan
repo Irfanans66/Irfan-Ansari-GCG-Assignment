@@ -1,0 +1,204 @@
+
+-- =========================================
+-- VIEW 1: User-level summary
+-- =========================================
+
+CREATE VIEW IF NOT EXISTS vw_user_summary AS
+
+WITH
+clean_register AS (
+    SELECT
+        user_id,
+        datetime(event_time) AS event_time,
+        date(event_time) AS event_date,
+        user_point_in_lifetime,
+        COALESCE(NULLIF(TRIM(user_country), ''), 'Unknown')
+            AS user_country,
+        user_device_platform,
+        user_marketing_user,
+        user_session_id,
+        game_name,
+        datetime(user_install_time) AS user_install_time
+    FROM sod_register
+),
+
+clean_session AS (
+    SELECT
+        user_id,
+        datetime(event_time) AS event_time,
+        date(event_time) AS event_date,
+        user_point_in_lifetime,
+        COALESCE(NULLIF(TRIM(user_country), ''), 'Unknown')
+            AS user_country,
+        user_device_platform,
+        user_marketing_user,
+        user_session_id,
+        datetime(user_install_time) AS user_install_time,
+        user_cumulative_iap_revenue,
+        user_cumulative_iap_payments,
+        event_session_length,
+        user_payer_user,
+        user_rank
+    FROM sod_session_start
+),
+
+clean_iap AS (
+    SELECT
+        user_id,
+        event_revenue_gross_usd AS revenue
+    FROM sod_revenue
+),
+
+clean_ad_revenue AS (
+    SELECT
+        user_id,
+        event_revenue_gross_usd AS revenue
+    FROM sod_adrevenue
+),
+
+session_summary AS (
+    SELECT
+        user_id,
+        SUM(event_session_length) AS total_session_duration,
+        MAX(user_cumulative_iap_payments)
+            AS max_cumulative_iap_payments
+    FROM clean_session
+    GROUP BY user_id
+),
+
+iap_summary AS (
+    SELECT
+        user_id,
+        SUM(revenue) AS total_iap_revenue
+    FROM clean_iap
+    GROUP BY user_id
+),
+
+ad_summary AS (
+    SELECT
+        user_id,
+        SUM(revenue) AS total_ad_revenue
+    FROM clean_ad_revenue
+    GROUP BY user_id
+)
+
+SELECT
+    r.user_id,
+    r.user_country,
+    r.user_device_platform,
+    r.user_marketing_user,
+
+    COALESCE(s.total_session_duration, 0)
+        AS total_session_duration,
+
+    COALESCE(i.total_iap_revenue, 0)
+        AS total_iap_revenue,
+
+    COALESCE(ad.total_ad_revenue, 0)
+        AS total_ad_revenue,
+
+    COALESCE(i.total_iap_revenue, 0)
+        + COALESCE(ad.total_ad_revenue, 0)
+        AS total_revenue,
+
+    COALESCE(s.max_cumulative_iap_payments, 0)
+        AS max_cumulative_iap_payments
+
+FROM (
+    SELECT *
+    FROM clean_register
+    WHERE user_id IS NOT NULL
+    GROUP BY user_id
+) AS r
+
+LEFT JOIN session_summary AS s
+    ON r.user_id = s.user_id
+
+LEFT JOIN iap_summary AS i
+    ON r.user_id = i.user_id
+
+LEFT JOIN ad_summary AS ad
+    ON r.user_id = ad.user_id;
+
+
+-- =========================================
+-- VIEW 2: Daily D1, D3 and D7 retention
+-- =========================================
+
+CREATE VIEW IF NOT EXISTS vw_retention AS
+
+WITH
+clean_register AS (
+    SELECT
+        user_id,
+        date(event_time) AS signup_date
+    FROM sod_register
+    WHERE user_id IS NOT NULL
+),
+
+clean_session AS (
+    SELECT
+        user_id,
+        user_point_in_lifetime
+    FROM sod_session_start
+    WHERE user_id IS NOT NULL
+),
+
+retention AS (
+    SELECT
+        r.user_id,
+        r.signup_date,
+        s.user_point_in_lifetime
+    FROM clean_register AS r
+    LEFT JOIN clean_session AS s
+        ON r.user_id = s.user_id
+)
+
+SELECT
+    signup_date AS SignUp_date,
+
+    COUNT(DISTINCT user_id) AS SignUp_users,
+
+    COUNT(DISTINCT CASE
+        WHEN user_point_in_lifetime = 1
+        THEN user_id
+    END) AS D1_users,
+
+    ROUND(
+        100.0 * COUNT(DISTINCT CASE
+            WHEN user_point_in_lifetime = 1
+            THEN user_id
+        END) / NULLIF(COUNT(DISTINCT user_id), 0),
+        2
+    ) AS D1_retention_pct,
+
+    COUNT(DISTINCT CASE
+        WHEN user_point_in_lifetime = 3
+        THEN user_id
+    END) AS D3_users,
+
+    ROUND(
+        100.0 * COUNT(DISTINCT CASE
+            WHEN user_point_in_lifetime = 3
+            THEN user_id
+        END) / NULLIF(COUNT(DISTINCT user_id), 0),
+        2
+    ) AS D3_retention_pct,
+
+    COUNT(DISTINCT CASE
+        WHEN user_point_in_lifetime = 7
+        THEN user_id
+    END) AS D7_users,
+
+    ROUND(
+        100.0 * COUNT(DISTINCT CASE
+            WHEN user_point_in_lifetime = 7
+            THEN user_id
+        END) / NULLIF(COUNT(DISTINCT user_id), 0),
+        2
+    ) AS D7_retention_pct
+
+FROM retention
+GROUP BY signup_date;
+
+select * from vw_retention
